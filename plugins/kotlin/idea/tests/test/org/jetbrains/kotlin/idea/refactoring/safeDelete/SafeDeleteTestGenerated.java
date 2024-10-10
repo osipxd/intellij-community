@@ -824,6 +824,11 @@ public abstract class SafeDeleteTestGenerated extends AbstractSafeDeleteTest {
             runTest("testData/refactoring/safeDelete/deleteValueParameter/kotlinValueParameter/dataClassComponent.kt");
         }
 
+        @TestMetadata("deepDelete.kt")
+        public void testDeepDelete() throws Exception {
+            runTest("testData/refactoring/safeDelete/deleteValueParameter/kotlinValueParameter/deepDelete.kt");
+        }
+
         @TestMetadata("defaultParam1.kt")
         public void testDefaultParam1() throws Exception {
             runTest("testData/refactoring/safeDelete/deleteValueParameter/kotlinValueParameter/defaultParam1.kt");

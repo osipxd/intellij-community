@@ -19,11 +19,16 @@ import com.intellij.refactoring.changeSignature.inCallers.JavaCallerChooser;
 import com.intellij.refactoring.changeSignature.inCallers.JavaMethodNode;
 import com.intellij.refactoring.safeDelete.usageInfo.SafeDeleteParameterCallHierarchyUsageInfo;
 import com.intellij.refactoring.safeDelete.usageInfo.SafeDeleteReferenceJavaDeleteUsageInfo;
+import com.intellij.uast.UastHintedVisitorAdapter;
+import com.intellij.uast.UastVisitorAdapter;
 import com.intellij.usageView.UsageInfo;
 import com.intellij.util.EmptyConsumer;
 import com.intellij.util.Processor;
 import com.intellij.util.containers.ContainerUtil;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.uast.*;
+import org.jetbrains.uast.visitor.AbstractUastNonRecursiveVisitor;
+import org.jetbrains.uast.visitor.AbstractUastVisitor;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -99,77 +104,75 @@ abstract class SafeDeleteJavaCallerChooser extends JavaCallerChooser {
   /**
    * @return parameter if it is used inside method only as argument in nodeMethod call at parameterIndex
    */
-  static PsiParameter isTheOnlyOneParameterUsage(PsiElement call, final int parameterIndex, final PsiMethod nodeMethod) {
-    if (call instanceof PsiCallExpression) {
-      final PsiExpressionList argumentList = ((PsiCallExpression)call).getArgumentList();
-      if (argumentList != null) {
-        final PsiExpression[] expressions = argumentList.getExpressions();
-        if (expressions.length > parameterIndex) {
-          final PsiExpression expression = PsiUtil.deparenthesizeExpression(expressions[parameterIndex]);
-          if (expression != null) {
-            final Set<PsiParameter> paramRefs = new HashSet<>();
-            expression.accept(new JavaRecursiveElementWalkingVisitor() {
+  static PsiParameter isTheOnlyOneParameterUsage(PsiElement psiCall, final int parameterIndex, final PsiMethod nodeMethod) {
+    UCallExpression call = UastContextKt.toUElement(psiCall, UCallExpression.class);
+    if (call != null) {
+      final List<UExpression> expressions = call.getValueArguments();
+      if (expressions.size() >= parameterIndex) {
+        // if (expression instanceof PsiTypeCastExpression)
+        final UExpression expression = UastUtils.skipParenthesizedExprDown(expressions.get(parameterIndex));
+
+        final Set<PsiParameter> paramRefs = new HashSet<>();
+        expression.accept(new AbstractUastVisitor() {
+          @Override
+          public boolean visitSimpleNameReferenceExpression(@NotNull USimpleNameReferenceExpression node) {
+            final PsiElement resolve = node.resolve();
+            if (resolve instanceof PsiParameter) {
+              paramRefs.add((PsiParameter)resolve);
+            }
+            return false;
+          }
+        });
+
+        final PsiParameter parameter = ContainerUtil.getFirstItem(paramRefs);
+        if (parameter != null && !parameter.isVarArgs()) {
+          final PsiElement scope = parameter.getDeclarationScope();
+          if (scope instanceof PsiMethod && ((PsiMethod)scope).findDeepestSuperMethods().length == 0 &&
+              OverridingMethodsSearch.search((PsiMethod)scope).findFirst() == null) {
+            final int scopeParamIdx = ((PsiMethod)scope).getParameterList().getParameterIndex(parameter);
+            final Ref<Boolean> ref = new Ref<>(false);
+            if (ReferencesSearch.search(parameter, new LocalSearchScope(scope)).forEach(new Processor<>() {
               @Override
-              public void visitReferenceExpression(@NotNull PsiReferenceExpression expression) {
-                super.visitReferenceExpression(expression);
-                final PsiElement resolve = expression.resolve();
-                if (resolve instanceof PsiParameter) {
-                  paramRefs.add((PsiParameter)resolve);
-                }
-              }
-            });
-
-            final PsiParameter parameter = ContainerUtil.getFirstItem(paramRefs);
-            if (parameter != null && !parameter.isVarArgs()) {
-              final PsiElement scope = parameter.getDeclarationScope();
-              if (scope instanceof PsiMethod && ((PsiMethod)scope).findDeepestSuperMethods().length == 0 &&
-                  OverridingMethodsSearch.search((PsiMethod)scope).findFirst() == null) {
-                final int scopeParamIdx = ((PsiMethod)scope).getParameterList().getParameterIndex(parameter);
-                final Ref<Boolean> ref = new Ref<>(false);
-                if (ReferencesSearch.search(parameter, new LocalSearchScope(scope)).forEach(new Processor<>() {
-                  @Override
-                  public boolean process(PsiReference reference) {
-                    final PsiElement element = reference.getElement();
-                    if (element instanceof PsiReferenceExpression) {
-                      PsiCallExpression parent = PsiTreeUtil.getParentOfType(element, PsiCallExpression.class);
-                      while (parent != null) {
-                        final PsiMethod resolved = parent.resolveMethod();
-                        if (scope.equals(resolved)) {
-                          if (usedInQualifier(element, parent, scopeParamIdx)) return false;
-                          return true;
-                        }
-                        if (nodeMethod.equals(resolved)) {
-                          if (usedInQualifier(element, parent, parameterIndex)) return false;
-                          ref.set(true);
-                          return true;
-                        }
-                        parent = PsiTreeUtil.getParentOfType(parent, PsiCallExpression.class, true);
-                      }
-                      return false;
-                    }
-                    return true;
-                  }
-
-                  private static boolean usedInQualifier(PsiElement element, PsiCallExpression parent, int parameterIndex) {
-                    PsiExpression qualifier = null;
-                    if (parent instanceof PsiMethodCallExpression) {
-                      qualifier = ((PsiMethodCallExpression)parent).getMethodExpression();
-                    }
-                    else if (parent instanceof PsiNewExpression) {
-                      qualifier = ((PsiNewExpression)parent).getQualifier();
-                    }
-
-                    if (PsiTreeUtil.isAncestor(qualifier, element, true)) {
+              public boolean process(PsiReference reference) {
+                final PsiElement element = reference.getElement();
+                if (element instanceof PsiReferenceExpression) {
+                  PsiCallExpression parent = PsiTreeUtil.getParentOfType(element, PsiCallExpression.class);
+                  while (parent != null) {
+                    final PsiMethod resolved = parent.resolveMethod();
+                    if (scope.equals(resolved)) {
+                      if (usedInQualifier(element, parent, scopeParamIdx)) return false;
                       return true;
                     }
-
-                    final PsiExpressionList list = parent.getArgumentList();
-                    return list != null && !PsiTreeUtil.isAncestor(list.getExpressions()[parameterIndex], element, false);
+                    if (nodeMethod.equals(resolved)) {
+                      if (usedInQualifier(element, parent, parameterIndex)) return false;
+                      ref.set(true);
+                      return true;
+                    }
+                    parent = PsiTreeUtil.getParentOfType(parent, PsiCallExpression.class, true);
                   }
-                }) && ref.get()) {
-                  return parameter;
+                  return false;
                 }
+                return true;
               }
+
+              private static boolean usedInQualifier(PsiElement element, PsiCallExpression parent, int parameterIndex) {
+                PsiExpression qualifier = null;
+                if (parent instanceof PsiMethodCallExpression) {
+                  qualifier = ((PsiMethodCallExpression)parent).getMethodExpression();
+                }
+                else if (parent instanceof PsiNewExpression) {
+                  qualifier = ((PsiNewExpression)parent).getQualifier();
+                }
+
+                if (PsiTreeUtil.isAncestor(qualifier, element, true)) {
+                  return true;
+                }
+
+                final PsiExpressionList list = parent.getArgumentList();
+                return list != null && !PsiTreeUtil.isAncestor(list.getExpressions()[parameterIndex], element, false);
+              }
+            }) && ref.get()) {
+              return parameter;
             }
           }
         }
@@ -177,6 +180,82 @@ abstract class SafeDeleteJavaCallerChooser extends JavaCallerChooser {
     }
     return null;
   }
+  //static PsiParameter isTheOnlyOneParameterUsage(PsiElement psiCall, final int parameterIndex, final PsiMethod nodeMethod) {
+  //  UCallExpression call = UastContextKt.toUElement(psiCall, UCallExpression.class);
+  //  if (call != null) {
+  //    final List<UExpression> expressions = call.getValueArguments();
+  //    if (expressions.size() >= parameterIndex) {
+  //      // if (expression instanceof PsiTypeCastExpression)
+  //      final UExpression expression = UastUtils.skipParenthesizedExprDown(expressions.get(parameterIndex));
+  //
+  //      final Set<PsiParameter> paramRefs = new HashSet<>();
+  //      expression.accept(new JavaRecursiveElementWalkingVisitor() {
+  //        @Override
+  //        public void visitReferenceExpression(@NotNull PsiReferenceExpression expression) {
+  //          super.visitReferenceExpression(expression);
+  //          final PsiElement resolve = expression.resolve();
+  //          if (resolve instanceof PsiParameter) {
+  //            paramRefs.add((PsiParameter)resolve);
+  //          }
+  //        }
+  //      });
+  //
+  //      final PsiParameter parameter = ContainerUtil.getFirstItem(paramRefs);
+  //      if (parameter != null && !parameter.isVarArgs()) {
+  //        final PsiElement scope = parameter.getDeclarationScope();
+  //        if (scope instanceof PsiMethod && ((PsiMethod)scope).findDeepestSuperMethods().length == 0 &&
+  //            OverridingMethodsSearch.search((PsiMethod)scope).findFirst() == null) {
+  //          final int scopeParamIdx = ((PsiMethod)scope).getParameterList().getParameterIndex(parameter);
+  //          final Ref<Boolean> ref = new Ref<>(false);
+  //          if (ReferencesSearch.search(parameter, new LocalSearchScope(scope)).forEach(new Processor<>() {
+  //            @Override
+  //            public boolean process(PsiReference reference) {
+  //              final PsiElement element = reference.getElement();
+  //              if (element instanceof PsiReferenceExpression) {
+  //                PsiCallExpression parent = PsiTreeUtil.getParentOfType(element, PsiCallExpression.class);
+  //                while (parent != null) {
+  //                  final PsiMethod resolved = parent.resolveMethod();
+  //                  if (scope.equals(resolved)) {
+  //                    if (usedInQualifier(element, parent, scopeParamIdx)) return false;
+  //                    return true;
+  //                  }
+  //                  if (nodeMethod.equals(resolved)) {
+  //                    if (usedInQualifier(element, parent, parameterIndex)) return false;
+  //                    ref.set(true);
+  //                    return true;
+  //                  }
+  //                  parent = PsiTreeUtil.getParentOfType(parent, PsiCallExpression.class, true);
+  //                }
+  //                return false;
+  //              }
+  //              return true;
+  //            }
+  //
+  //            private static boolean usedInQualifier(PsiElement element, PsiCallExpression parent, int parameterIndex) {
+  //              PsiExpression qualifier = null;
+  //              if (parent instanceof PsiMethodCallExpression) {
+  //                qualifier = ((PsiMethodCallExpression)parent).getMethodExpression();
+  //              }
+  //              else if (parent instanceof PsiNewExpression) {
+  //                qualifier = ((PsiNewExpression)parent).getQualifier();
+  //              }
+  //
+  //              if (PsiTreeUtil.isAncestor(qualifier, element, true)) {
+  //                return true;
+  //              }
+  //
+  //              final PsiExpressionList list = parent.getArgumentList();
+  //              return list != null && !PsiTreeUtil.isAncestor(list.getExpressions()[parameterIndex], element, false);
+  //            }
+  //          }) && ref.get()) {
+  //            return parameter;
+  //          }
+  //        }
+  //      }
+  //    }
+  //  }
+  //  return null;
+  //}
 
   protected PsiParameter getParameterInCaller(PsiMethod called, int paramIdx, PsiMethod caller) {
     //do not change hierarchy

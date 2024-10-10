@@ -4,11 +4,11 @@ package org.jetbrains.kotlin.idea.k2.refactoring.safeDelete
 import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.project.Project
-import com.intellij.psi.ElementDescriptionUtil
-import com.intellij.psi.PsiElement
-import com.intellij.psi.PsiMember
+import com.intellij.openapi.util.Ref
+import com.intellij.psi.*
 import com.intellij.psi.search.searches.MethodReferencesSearch
 import com.intellij.psi.search.searches.ReferencesSearch
+import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.refactoring.RefactoringBundle
 import com.intellij.refactoring.safeDelete.JavaSafeDeleteDelegate
 import com.intellij.refactoring.safeDelete.NonCodeUsageSearchInfo
@@ -213,12 +213,91 @@ class KotlinFirSafeDeleteProcessor : SafeDeleteProcessorDelegateBase() {
             findCallArgumentsToDelete(result, element, parameterIndexAsJavaCall, containingClass)
         }
 
-
         ReferencesSearch.search(ktElement).forEach(Processor {
             JavaSafeDeleteDelegate.EP.forLanguage(it.element.language)
                 ?.createUsageInfoForParameter(it, result, element, parameterIndexAsJavaCall, element.isVarArg)
+
+            if (!element.isVarArg && ktElement is KtFunction) {
+                val parameterInCaller = isTheOnlyOneParameterUsage(it.element.parent, parameterIndexAsJavaCall, ktElement)
+                if (parameterInCaller != null) {
+                    JavaSafeDeleteDelegate.EP.forLanguage(it.element.language)
+                        ?.createUsageInfoForParameter(it, result, parameterInCaller, parameterInCaller.parameterIndex(), parameterInCaller.isVarArg)
+                    //result.add(
+                    //    if (ApplicationManager.getApplication().isUnitTestMode) SafeDeleteParameterCallHierarchyUsageInfo(caller, parameterInCaller, caller, parameterInCaller)
+                    //    else SafeDeleteParameterCallHierarchyUsageInfo(ktElement, element, caller, parameterInCaller)
+                    //)
+                }
+            }
             return@Processor true
         })
+    }
+
+    private fun isTheOnlyOneParameterUsage(call: PsiElement, parameterIndex: Int, function: KtFunction): KtParameter? {
+        if (call !is KtCallExpression) return null
+        val expression = call.valueArguments.getOrNull(parameterIndex)?.getArgumentExpression() ?: return null
+
+        val paramRefs = mutableSetOf<KtParameter>()
+        expression.accept(object : KtTreeVisitorVoid() {
+            override fun visitSimpleNameExpression(expression: KtSimpleNameExpression) {
+                val resolve = expression.mainReference.resolve()
+                if (resolve is KtParameter) paramRefs += resolve
+            }
+        })
+
+        val ref = Ref(false)
+        val parameter = paramRefs.firstOrNull()
+        if (parameter != null && !parameter.isVarArg) {
+            val scope = parameter.ownerFunction
+            val parameterIndex = parameter.parameterIndex()
+            if (scope != null) {
+                val scopeParameterIndex = scope.valueParameters.indexOf(parameter)
+                ReferencesSearch.search(parameter, parameter.useScope).forEach(Processor { reference ->
+                    val element = reference.element
+                    if (element is KtReferenceExpression) {
+                        var parent = PsiTreeUtil.getParentOfType(element, KtCallExpression::class.java)
+                        while (parent != null) {
+                            val resolved = parent.mainReference.resolve()
+                            if (scope == resolved) {
+                                return@Processor !element.usedInQualifier(parent, scopeParameterIndex)
+                            }
+                            if (function == resolved) {
+                                if (element.usedInQualifier(parent, parameterIndex)) return@Processor false
+                                ref.set(true)
+                                return@Processor true
+                            }
+                            parent = PsiTreeUtil.getParentOfType(parent, KtCallExpression::class.java, true)
+                        }
+                        return@Processor false
+                    }
+                    true
+                })
+            }
+        }
+
+        if (ref.get()) return parameter
+
+        return null
+        //val expression = when (call) {
+        //    is KtCallExpression -> call.valueArguments.getOrNull(parameterIndex)?.let { KtPsiUtil.deparenthesize(it.getArgumentExpression()) }
+        //    is PsiCallExpression -> call.argumentList?.expressions?.getOrNull(parameterIndex)?.let(PsiUtil::deparenthesizeExpression)
+        //    else -> null
+        //} ?: return null
+    }
+
+    private fun KtReferenceExpression.usedInQualifier(parent: KtCallExpression?, parameterIndex: Int): Boolean {
+        //var qualifier: PsiExpression? = null
+        //if (parent is KtFunctionCallExpression) {
+        //    qualifier = parent.methodExpression
+        //} else if (parent is PsiNewExpression) {
+        //    qualifier = parent.qualifier
+        //}
+        //
+        //if (PsiTreeUtil.isAncestor(qualifier, this, true)) {
+        //    return true
+        //}
+
+        val list = parent?.valueArguments
+        return list != null && !PsiTreeUtil.isAncestor(list[parameterIndex].getArgumentExpression(), this, false)
     }
 
     override fun getElementsToSearch(

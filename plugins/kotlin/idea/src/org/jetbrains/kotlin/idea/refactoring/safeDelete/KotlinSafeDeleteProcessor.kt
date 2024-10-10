@@ -2,6 +2,7 @@
 
 package org.jetbrains.kotlin.idea.refactoring.safeDelete
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
@@ -54,6 +55,8 @@ class KotlinSafeDeleteProcessor : JavaSafeDeleteProcessor() {
                 by NotNullableUserDataProperty(Key.create("ALLOW_LIFTING_ACTUAL_PARAMETER_TO_EXPECTED"), true)
 
         private var KtDeclaration.dropActualModifier: Boolean? by UserDataProperty(Key.create("DROP_ACTUAL_MODIFIER"))
+
+        private val LOG: Logger = Logger.getInstance(KotlinSafeDeleteProcessor::class.java)
     }
 
     override fun handlesElement(element: PsiElement): Boolean = element.canDeleteElement()

@@ -1,0 +1,10 @@
+fun consumer2() {
+    targetFunction()
+    consumer1()
+}
+
+fun consumer1() {
+    targetFunction()
+}
+
+fun targetFunction(<caret>i: Int) {}

@@ -733,6 +733,11 @@ public abstract class K2SafeDeleteTestGenerated extends AbstractK2SafeDeleteTest
             runTest("../../idea/tests/testData/refactoring/safeDelete/deleteValueParameter/kotlinValueParameter/dataClassComponent.kt");
         }
 
+        @TestMetadata("deepDelete.kt")
+        public void testDeepDelete() throws Exception {
+            runTest("../../idea/tests/testData/refactoring/safeDelete/deleteValueParameter/kotlinValueParameter/deepDelete.kt");
+        }
+
         @TestMetadata("defaultParam1.kt")
         public void testDefaultParam1() throws Exception {
             runTest("../../idea/tests/testData/refactoring/safeDelete/deleteValueParameter/kotlinValueParameter/defaultParam1.kt");
